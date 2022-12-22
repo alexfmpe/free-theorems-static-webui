@@ -355,12 +355,12 @@ mkContext cx = case cx of
     (CxEmpty _)    -> return []
 
     where
-      trans (ClassA _ qname [TyVar _ var]) = do
+      trans (TypeA _ (TyApp _ (TyCon _ qname) (TyVar _ var))) = do
         ident <- liftM S.TC (mkIdentifierQ qname)
         tv    <- mkTypeVariable var
         return $ (ident, tv)
 
-      trans (ClassA _ _ _) = throwError errContext
+      trans (TypeA _ _) = throwError errContext
       trans (IParam _ _ _) = throwError errImplicit
 
 errContext =
