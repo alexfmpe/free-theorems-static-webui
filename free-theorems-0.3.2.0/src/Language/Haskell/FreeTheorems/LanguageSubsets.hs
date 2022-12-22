@@ -1,7 +1,7 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 
 -- | Declares the available Haskell language subsets and the result types for
---   generating free theorems. 
+--   generating free theorems.
 
 module Language.Haskell.FreeTheorems.LanguageSubsets where
 
@@ -54,6 +54,3 @@ data TheoremType
         -- ^ Two inequational free theorems should be generated.
 
   deriving (Typeable, Data, Eq)
-
-
-

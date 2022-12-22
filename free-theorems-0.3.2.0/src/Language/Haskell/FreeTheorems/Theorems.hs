@@ -22,33 +22,37 @@ type Theorem = Formula
 
 -- | Logical formula constituting automatically generated theorems.
 
-data Formula 
+data Formula
   = ForallRelations RelationVariable (TypeExpression, TypeExpression)
                     [Restriction] Formula
         -- ^ Quantifies a relation variable and two type expressions.
-  
-  | ForallFunctions (Either TermVariable TermVariable) 
+
+  | ForallFunctions (Either TermVariable TermVariable)
                     (TypeExpression, TypeExpression) [Restriction] Formula
         -- ^ Quantifies a function variable and two type expressions.
-  
+
+  | ForallTypeConstructors RelationVariable (TypeExpression, TypeExpression)
+                    [Restriction] Formula
+        -- ^ Quantifies a type constructor relation.
+
   | ForallPairs (TermVariable, TermVariable) Relation Formula
         -- ^ Quantifies two term variables taken from a relation.
-  
+
   | ForallVariables TermVariable TypeExpression Formula
         -- ^ Quantifies a term variable of a certain type.
-  
+
   | Equivalence Formula Formula
         -- ^ Two formulas are equivalent.
-  
+
   | Implication Formula Formula
         -- ^ The first formula implies the second formula.
-  
+
   | Conjunction Formula Formula
         -- ^ The first formula and the second formula.
-  
+
   | Predicate Predicate
         -- ^ A basic formula.
-  
+
   deriving (Typeable, Data)
 
 
@@ -71,20 +75,20 @@ data Restriction
 data Predicate
   = IsMember Term Term Relation
         -- ^ The pair of two terms is contained in a relation.
-  
+
   | IsEqual Term Term
         -- ^ Two terms are equal.
-  
+
   | IsLessEq Term Term
         -- ^ The first term is less defined than the second one, based on the
         --   semantical approximation order.
-  
+
   | IsNotBot Term
         -- ^ The term is not equal to @_|_@.
 
   | IsTrue
         -- ^ Constant True Predicate
-  
+
   deriving (Typeable, Data)
 
 
@@ -110,32 +114,35 @@ newtype TermVariable = TVar String
 -- | Relations are the foundations of free theorems.
 
 data Relation
-  = RelVar RelationInfo RelationVariable 
+  = RelVar RelationInfo RelationVariable
         -- ^ A relation variable.
- 
+
+  | RelConsFunVar RelationInfo RelationVariable
+        -- ^ (thr) A relation function representing a type construction variable
+
   | FunVar RelationInfo (Either Term Term)
         -- ^ A function variable.
         --   It might be either a function to be applied on the left side (in
-        --   equational and inequational cases) or on the right side (in 
+        --   equational and inequational cases) or on the right side (in
         --   inequational cases only).
         --   In inequational cases, the term is additionally composed with the
         --   semantic approximation partial order.
- 
+
   | RelBasic RelationInfo
         -- ^ A basic relation corresponding to a nullary type constructor.
         --   Depending on the theorem type, this can be either an equivalence
         --   relation or the semantic approximation partial order.
-  
+
   | RelLift RelationInfo TypeConstructor [Relation]
         -- ^ A lifted relation for any nonnullary type constructor.
         --   The semantics of lifted relations is differs with the language
         --   subset:
         --   In inequational subsets lifted relations explicitly require
-        --   left-closedness by composition with the semantic approximation 
+        --   left-closedness by composition with the semantic approximation
         --   partial order.
         --   In equational subsets with fix or seq, this relation requires
         --   strictness explicitly by relating the undefined value with itself.
-  
+
   | RelFun RelationInfo Relation Relation
         -- ^ A relation corresponding to a function type constructor.
         --   The semantics of this relation differs with the language subset:
@@ -148,12 +155,22 @@ data Relation
         -- ^ A relation corresponding to a function type constructor.
         --   The semantics of this relation differs with the language subset:
         --   Apart from the equational subset with seq, it is equal to RelFun.
-        --   In the equational subset with Seq, this relation is _not_ 
+        --   In the equational subset with Seq, this relation is _not_
         --   explicitly requiring bottom-reflectiveness of its members.
-  
+
   | RelAbs RelationInfo RelationVariable (TypeExpression, TypeExpression)
            [Restriction] Relation
         -- ^ A relation corresponding to a type abstraction.
+        --   (thr) This cannot be a type constructor variable, since a type constructor
+        --   is not a valid type.
+
+  | RelTypeConsAbs RelationInfo RelationVariable (TypeExpression, TypeExpression) [Restriction] Relation
+        -- ^ (thr) Relation corresponding to a type constructor abstraction.
+        --   This isn't really a difference in haskell syntax, but the
+        --   resulting relational structures are different.
+
+  | RelTypeConsApp RelationInfo RelationVariable Relation
+        -- ^ (thr) Relation corresponding to type constructor application
 
   | FunAbs RelationInfo (Either TermVariable TermVariable)
            (TypeExpression, TypeExpression) [Restriction] Relation
@@ -167,14 +184,19 @@ data Relation
 
 relationInfo :: Relation -> RelationInfo
 relationInfo rel = case rel of
-  RelVar ri _       -> ri
-  FunVar ri _       -> ri
-  RelBasic ri       -> ri
-  RelLift ri _ _    -> ri
-  RelFun ri _ _     -> ri
-  RelFunLab ri _ _  -> ri
-  RelAbs ri _ _ _ _ -> ri
-  FunAbs ri _ _ _ _ -> ri
+  RelVar ri _                  -> ri
+  RelConsFunVar ri _           -> ri
+  FunVar ri _                  -> ri
+  RelBasic ri                  -> ri
+  RelLift ri _ _               -> ri
+  RelFun ri _ _                -> ri
+  RelFunLab ri _ _             -> ri
+  RelAbs ri _ _ _ _            -> ri
+  RelTypeConsAbs ri _ _ _ _    -> ri
+  RelTypeConsApp ri _ _        -> ri
+--  RelTypeConsFunAbs ri _ _ _ _ -> ri
+--  RelTypeConsFunApp ri _ _     -> ri
+  FunAbs ri _ _ _ _            -> ri
 
 
 
@@ -183,14 +205,14 @@ relationInfo rel = case rel of
 data RelationInfo = RelationInfo
   { relationLanguageSubset :: LanguageSubset
         -- ^ The language subset in which a relation was generated.
-  
+
   , relationLeftType       :: TypeExpression
         -- ^ The type of the first components of pairs contained in a relation.
-  
+
   , relationRightType      :: TypeExpression
-        -- ^ The type of the second components of pairs contained in a 
+        -- ^ The type of the second components of pairs contained in a
         --   relation.
-  
+
   }
   deriving (Typeable, Data, Eq)
 
@@ -233,10 +255,7 @@ data DataConstructor
 
 -- | A relational description of a class declaration.
 
-data UnfoldedClass 
+data UnfoldedClass
   = UnfoldedClass [TypeClass] TypeClass (Either RelationVariable TermVariable)
                   [Formula]
   deriving (Typeable, Data)
-
-
-

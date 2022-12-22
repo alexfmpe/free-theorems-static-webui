@@ -26,13 +26,14 @@ import qualified Data.Map as Map (Map, empty, lookup, insert, map)
 import Data.Maybe (fromMaybe)
 
 import Language.Haskell.FreeTheorems.LanguageSubsets
-import Language.Haskell.FreeTheorems.Syntax 
+import Language.Haskell.FreeTheorems.Syntax
 import Language.Haskell.FreeTheorems.ValidSyntax
 import Language.Haskell.FreeTheorems.Theorems
 import Language.Haskell.FreeTheorems.Frontend.TypeExpressions
     ( substituteTypeVariables )
-import Language.Haskell.FreeTheorems.NameStores 
-    ( relationNameStore, typeExpressionNameStore, functionNameStore1, functionNameStore2 )
+import Language.Haskell.FreeTheorems.NameStores
+    ( relationNameStore, typeExpressionNameStore, functionNameStore1, functionNameStore2,
+      typeConstVarNameStore )
 
 ------- Intermediate data structure -------------------------------------------
 
@@ -40,16 +41,16 @@ import Language.Haskell.FreeTheorems.NameStores
 -- | A structure describing the intermediate result of interpreting a type
 --   expression as a relation.
 
-data Intermediate = Intermediate 
-  { intermediateName      :: String 
+data Intermediate = Intermediate
+  { intermediateName      :: String
         -- ^ The name of the symbol for which the theorem is to be generated.
-  
+
   , intermediateSubset    :: LanguageSubset
         -- ^ The language subset in which the theorem is to be generated.
-  
+
   , intermediateRelation :: Relation
         -- ^ The relation obtained from the type.
-  
+
   , functionVariableNames1 :: [String]
         -- ^ A name store for new, fresh function names.
         --   This is needed because functions can be specialised step-by-step
@@ -62,11 +63,11 @@ data Intermediate = Intermediate
   , signatureNames :: [String]
         -- ^ The names of all known signatures. These names must not be used to
         --   generate names of functions and variables.
-  
-  , interpretNameStore :: NameStore 
+
+  , interpretNameStore :: NameStore
         -- ^ A name store to generate new relation variables and type
         --   expressions.
-  
+
   }
 
 
@@ -80,7 +81,7 @@ data Intermediate = Intermediate
 -- | Interprets a valid signature as a relation. This is the key point for
 --   generating free theorems.
 
-interpret :: 
+interpret ::
     [ValidDeclaration] -> LanguageSubset -> ValidSignature -> Maybe Intermediate
 interpret vds l s =
   let n  = unpackIdent . signatureName . rawSignature $ s
@@ -91,17 +92,17 @@ interpret vds l s =
       r = Intermediate n l i (filter (`notElem` fs) functionNameStore1) (filter (`notElem` fs) functionNameStore2) ss rs
    in case l of
         SubsetWithSeq _ -> Just r
-        otherwise       -> if containsStrictTypes vds s 
+        otherwise       -> if containsStrictTypes vds s
                              then Nothing
                              else Just r
   where
     getSignatureNames = everything (++) ([] `mkQ` getSigName)
     getSigName (Signature i _) = [unpackIdent i]
 
-    containsStrictTypes vds s = 
+    containsStrictTypes vds s =
       let rs = rawSignature s
           ns = everything (++) ([] `mkQ` getCons `extQ` getClasses) rs
-          ds = map (getDeclarationName . rawDeclaration) 
+          ds = map (getDeclarationName . rawDeclaration)
                    (filter isStrictDeclaration vds)
           isStrict n = n `elem` ds
        in any isStrict ns
@@ -115,9 +116,9 @@ interpret vds l s =
 --   map seen type variables to newly created relation variables. The state
 --   serves for creating relation variables.
 
-interpretM :: 
-    LanguageSubset 
-    -> TypeExpression 
+interpretM ::
+    LanguageSubset
+    -> TypeExpression
     -> ReaderT Environment (State NameStore) Relation
 
 interpretM l t = case t of
@@ -131,6 +132,7 @@ interpretM l t = case t of
 
     -- either create a basic relation or a lift relation, depending on the
     -- subtypes
+
   TypeCon c ts -> do
     rs <- mapM (interpretM l) ts   -- interpret the subtypes
     ri <- mkRelationInfo l t       -- create the relation info
@@ -156,13 +158,26 @@ interpretM l t = case t of
     liftM2 (RelFunLab ri) (interpretM l t1) (interpretM l t2)
 
     -- create a relation for type abstractions
-  TypeAbs v cs t' -> do
-    ri <- mkRelationInfo l t                    -- create the relation info
-    (rv, t1, t2) <- lift newRelationVariable    -- create a new variable
-    let rvar = RelVar (RelationInfo l t1 t2) rv
-    r  <- local (Map.insert v rvar) $ interpretM l t'  -- subrelations
+  TypeAbs v@(TV i) cs t' -> do
+    -- (thr) check if variable is used as type constructor. When this is
+    --       the case, use RelTypeConsAbs instead of RelAbs.
+    ri <- mkRelationInfo l t
+    (rv, t1, t2) <- lift $ if (isUsedAsTypeConstructor i t')
+                              then newTypeConstRelationVariable
+                              else newRelationVariable -- create a new variable
+
     let res = relRes l ++ (if null cs then [] else [RespectsClasses cs])
-    return (RelAbs ri rv (t1,t2) res r)
+    if (isUsedAsTypeConstructor i t')
+      then do
+            let rvar = RelConsFunVar (RelationInfo l t1 t2) rv
+            r  <- local (Map.insert v rvar) $ interpretM l t'  -- subrelations
+            let res = relRes l ++ (if null cs then [] else [RespectsClasses cs])
+            return $ RelTypeConsAbs ri rv (t1,t2) res r
+      else do
+            let rvar = RelVar (RelationInfo l t1 t2) rv
+            r  <- local (Map.insert v rvar) $ interpretM l t'  -- subrelations
+            let res = relRes l ++ (if null cs then [] else [RespectsClasses cs])
+            return $ RelAbs ri rv (t1,t2) res r
 
     -- create a second relation for type abstractions (used only for language
     -- subset with seq and the equational setting
@@ -174,7 +189,25 @@ interpretM l t = case t of
     let res = (filter (/= BottomReflecting) (relRes l)) ++ (if null cs then [] else [RespectsClasses cs])
     return (RelAbs ri rv (t1,t2) res r)
 
+    -- (thr) create a relation for type constructor variable application
+  TypeVarApp v ts -> do
+    env <- ask
+    rv <- maybeToMonad (Map.lookup v env) -- (RelVar ri rv)
+    let rvname = case rv of
+                    (RelConsFunVar _ name) -> name
+                    (RelVar _ name) -> name
+
+    genri <- mkRelationInfo l t
+
+    -- (thr) right now, only single type parameters are supported.
+    (r:_) <- mapM (interpretM l) ts   -- interpret the subtypes
+
+    return (RelTypeConsApp genri rvname r)
+
   where
+--    concatTypeStr t1 t2 = show t1 ++ case t2 of
+--                                        (TypeVar v) -> show t2
+--                                        otherwise   -> " (" ++ show t2 ++ ")"
     mkRelationInfo l t = do
       env <- ask
         -- create the 'left' and 'right' type expression of 't',
@@ -198,7 +231,7 @@ interpretM l t = case t of
                                            , BottomReflecting ]
       SubsetWithSeq InequationalTheorem -> [ Strict, Continuous, Total
                                            , LeftClosed ]
-   
+
 
 
 
@@ -209,15 +242,16 @@ interpretM l t = case t of
 -- | An environment mapping type variables to intermediate relation variables
 --   (stored as relations).
 
-type Environment = Map.Map TypeVariable Relation 
+type Environment = Map.Map TypeVariable Relation
 
 
 
 -- | Represents the names of future variable names. The first component provides
 --   names for relations, while the second component provides names for type
 --   expressions.
+--   (thr) The third component contains names for type constructor variables.
 
-type NameStore = ([String], [TypeExpression])
+type NameStore = ([String], [TypeExpression], [TypeExpression])
 
 
 
@@ -226,44 +260,70 @@ type NameStore = ([String], [TypeExpression])
 --   For more information, see 'Language.Haskell.FreeTheorems.NameStore'.
 
 initialState :: [String] -> NameStore
-initialState ns = 
+initialState ns =
    ( relationNameStore
    , map (TypeExp . TF . Ident) . filter (`notElem` ns)
-         $ typeExpressionNameStore )
+         $ typeExpressionNameStore
+   , map (TypeExp . TF . Ident) . filter (`notElem` ns)
+         $ typeConstVarNameStore )
 
 
+-- | (thr) Checks if the given type variable is applied to arguments, which
+--   makes it a type constructor variable.
+
+isUsedAsTypeConstructor :: Identifier -> TypeExpression -> Bool
+isUsedAsTypeConstructor i t = case t of
+    (TypeVarApp (TV i') ts) -> (i == i') || isListTypeCons ts
+    (TypeVar (TV i')) -> False
+    (TypeCon _ ts) -> isListTypeCons ts
+    (TypeFun t1 t2) -> isUsedAsTypeConstructor i t1 || isUsedAsTypeConstructor i t2
+    (TypeFunLab t1 t2) -> isUsedAsTypeConstructor i t1 || isUsedAsTypeConstructor i t2
+    (TypeAbs (TV i') _ t) -> (i /= i') && isUsedAsTypeConstructor i t
+    (TypeAbsLab (TV i') _ t) -> (i /= i') && isUsedAsTypeConstructor i t
+    (TypeExp _) -> False
+    where
+      isListTypeCons = any $ isUsedAsTypeConstructor i
 
 -- | Creates a new relation variable using the name store.
 
-newRelationVariable :: 
+newRelationVariable ::
     State NameStore (RelationVariable, TypeExpression, TypeExpression)
 newRelationVariable = do
-  (rvs, ts) <- get
+  (rvs, ts, tcs) <- get
   let ([rv], rvs') = splitAt 1 rvs
   let ([t1, t2], ts') = splitAt 2 ts
-  put (rvs', ts') 
+  put (rvs', ts', tcs)
   return (RVar rv, t1, t2)
 
 
+-- | (thr) Creates a new type constructor relation variable using the name store.
 
-
+newTypeConstRelationVariable ::
+  State NameStore (RelationVariable, TypeExpression, TypeExpression)
+newTypeConstRelationVariable = do
+  (rvs, ts, tcs) <- get
+  let ([rv], rvs') = splitAt 1 rvs
+  let ([tc1, tc2], tcs') = splitAt 2 tcs
+  put (rvs', ts, tcs')
+  return (RVar rv, tc1, tc2)
 
 ------- Instantiation of relation variables -----------------------------------
 
-
 -- | Creates a list of all bound relation variables in an intermediate
---   structure, which can be specialised to a function. 
+--   structure, which can be specialised to a function.
 
 relationVariables :: Intermediate -> [RelationVariable]
 relationVariables (Intermediate _ _ rel _ _ _ _) = getRVar True rel
   where
     getRVar ok rel = case rel of
-      RelLift _ _ rs    -> concatMap (getRVar ok) rs
-      RelFun _ r1 r2    -> getRVar (not ok) r1 ++ getRVar ok r2
-      RelFunLab _ r1 r2 -> getRVar (not ok) r1 ++ getRVar ok r2
-      RelAbs _ rv _ _ r -> (if ok then [rv] else []) ++ getRVar ok r
-      FunAbs _ _ _ _ r  -> getRVar ok r 
-      otherwise         -> []
+      RelLift _ _ rs           -> concatMap (getRVar ok) rs
+      RelTypeConsAbs _ _ _ _ r -> getRVar ok r
+      RelTypeConsApp _ _ r     -> getRVar ok r
+      RelFun _ r1 r2           -> getRVar (not ok) r1 ++ getRVar ok r2
+      RelFunLab _ r1 r2        -> getRVar (not ok) r1 ++ getRVar ok r2
+      RelAbs _ rv _ _ r        -> (if ok then [rv] else []) ++ getRVar ok r
+      FunAbs _ _ _ _ r         -> getRVar ok r
+      otherwise                -> []
 
 
 
@@ -273,14 +333,12 @@ relationVariables (Intermediate _ _ rel _ _ _ _) = getRVar True rel
 specialise :: Intermediate -> RelationVariable -> Intermediate
 specialise ir rv = reduceLifts (replaceRelVar ir rv Left)
 
-
-
 -- | Specialises a relation variable to an inverse function variable.
 --   This function does not modify intermediate structures in subsets with
 --   equational theorems.
 
 specialiseInverse :: Intermediate -> RelationVariable -> Intermediate
-specialiseInverse ir rv = 
+specialiseInverse ir rv =
   case theoremType (intermediateSubset ir) of
     EquationalTheorem   -> ir
     InequationalTheorem -> reduceLifts  (replaceRelVar ir rv Right)
@@ -289,8 +347,8 @@ specialiseInverse ir rv =
 
 -- | Replaces a relation variable with a function variable.
 
-replaceRelVar :: 
-    Intermediate -> RelationVariable 
+replaceRelVar ::
+    Intermediate -> RelationVariable
     -> (TermVariable -> Either TermVariable TermVariable) -> Intermediate
 replaceRelVar ir (RVar rv) leftOrRight =
   let ([funName], fns) = splitAt 1 (functionVariableNames1 ir)
@@ -304,7 +362,7 @@ replaceRelVar ir (RVar rv) leftOrRight =
     -- when replacing a relation by a 'right' function in a relation
     -- abstraction, the types have to be flipped
     replace rv fv rel = case rel of
-      RelVar ri (RVar r) -> 
+      RelVar ri (RVar r) ->
         let tv = either (Left . TermVar) (Right . TermVar) fv
          in if rv == r then FunVar ri tv else rel
       RelAbs ri (RVar r) ts res rel' ->
@@ -316,6 +374,7 @@ replaceRelVar ir (RVar rv) leftOrRight =
          in if rv == r
               then FunAbs ri fv ts (res' ++ (classConstraints res)) rel'
               else rel
+
       otherwise -> rel
 
     -- the restrictions for functions in the equational setting and for
@@ -324,7 +383,7 @@ replaceRelVar ir (RVar rv) leftOrRight =
       BasicSubset     -> [ ]
       SubsetWithFix _ -> [ Strict ]
       SubsetWithSeq _ -> [ Strict, Total ]
-    
+
     -- the restrictions for 'right' functions in the inequational settings
     funResR = case intermediateSubset ir of
       BasicSubset     -> [ ]
@@ -333,39 +392,40 @@ replaceRelVar ir (RVar rv) leftOrRight =
 
     -- returns the class constraints
     classConstraints res = filter isCC res
-      where 
+      where
         isCC r = case r of { RespectsClasses _ -> True ; otherwise -> False }
 
 
 
--- | Applies simplifications on lifted constructors. 
+-- | Applies simplifications on lifted constructors.
 --   If the argument is a function then lifted lists are replaced by map and
 --   lifted Maybes are replaced by fmap.
 
 reduceLifts :: Intermediate -> Intermediate
-reduceLifts ir = 
+reduceLifts ir =
 --  ir { intermediateRelation = reduceEverywhere (intermediateRelation ir) }
   ir { intermediateRelation = re True (intermediateRelation ir) }
   where
 --    reduceEverywhere = everywhere (mkT reduce)
 
     re ok rel = case rel of
-      RelLift ri con rs     -> if ok 
+      RelLift ri con rs     -> if ok
                                  then reduce (RelLift ri con (map (re ok) rs))
                                  else rel
-      RelFun ri r1 r2       -> RelFun ri (re (mk' (not ok) ri r1) r1) 
+      RelFun ri r1 r2       -> RelFun ri (re (mk' (not ok) ri r1) r1)
                                          (re (mk ok ri r2) r2)
       -- second logical relation for functions. Only used for the language
       -- subset with Seq in the equational setting
-      RelFunLab ri r1 r2    -> RelFunLab ri (re (mk' (not ok) ri r1) r1) 
+      RelFunLab ri r1 r2    -> RelFunLab ri (re (mk' (not ok) ri r1) r1)
                                             (re (mk ok ri r2) r2)
       RelAbs ri rv ts res r -> RelAbs ri rv ts res (re ok r)
       FunAbs ri fv ts res r -> FunAbs ri fv ts res (re ok r)
+      RelTypeConsAbs ri rv ts res rel -> RelTypeConsAbs ri rv ts res (re ok rel)
       otherwise             -> rel
 
     mk' ok ri r = case theoremType (relationLanguageSubset ri) of
                     EquationalTheorem   -> True
-                    InequationalTheorem -> 
+                    InequationalTheorem ->
                       case r of
                         RelLift _ ConList _ -> True
                         otherwise           -> ok
@@ -375,13 +435,13 @@ reduceLifts ir =
                    EquationalTheorem   -> True
                    InequationalTheorem -> ok
 
-
     -- Transforms a lifted constructor to a function, if possible.
     -- This function is applied in a bottom-up manner, therefore the
     -- arguments of the lifted constructor are already reduced.
     reduce rel = case rel of
-      RelLift ri con rs -> maybe rel id (toTerm ri con rs)
-      otherwise         -> rel
+      RelLift ri con rs          -> maybe rel id (toTerm ri con rs)
+--      RelTypeConsApp ri lef rel' -> RelBasic (relationInfo rel)
+      otherwise                  -> rel
 
     -- Tries to transform a lifted relation. If not succesful, Nothing is
     -- returned.
@@ -418,13 +478,7 @@ reduceLifts ir =
       otherwise           -> Nothing
 
     -- Creates a term by instantiating 'f' and applying the arguments of 'fts'.
-    term f fts = 
+    term f fts =
         let (fs, ts) = unzip fts
             termins t (t1, t2) = TermIns (TermIns t t1) t2
          in foldl TermApp (foldl termins (TermVar f) ts) fs
-      
-
-
-
-
-

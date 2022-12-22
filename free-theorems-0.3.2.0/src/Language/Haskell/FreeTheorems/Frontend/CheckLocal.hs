@@ -12,8 +12,8 @@ module Language.Haskell.FreeTheorems.Frontend.CheckLocal (
 
 
 import Data.Generics (Data, everything, mkQ)
-import Data.List (group, sort)
-import Data.Maybe (mapMaybe, fromJust, isJust)
+import Data.List (group, sort, nubBy)
+import Data.Maybe (mapMaybe, fromJust, isJust, isNothing)
 import qualified Data.Set as Set
     ( Set, union, empty, difference, fromList, null, elems, isSubsetOf
     , singleton)
@@ -50,7 +50,7 @@ checkLocal = foldChecks checkDecl
 
 
 -- | Checks a @data@ declaration. The following restrictions must hold:
---   
+--
 --   * The declared type constructor is not a primitive type.
 --   * The variables occurring on the right-hand side have to be mentioned on
 --     the left-hand side, and the left-hand side variables are pairwise
@@ -65,20 +65,20 @@ checkDataDecl d =
     checkNotPrimitive (dataName d)
     checkVariables (dataVars d)
                    (everything Set.union
-                      (Set.empty `mkQ` (freeTypeVariables . withoutBang)) 
+                      (Set.empty `mkQ` (freeTypeVariables . withoutBang))
                       (dataCons d))
     checkNotEmpty (dataCons d)
     mapM_ (checkNotNested (dataName d) (map TypeVar (dataVars d)))
           (conNamesAndTypes d)
     mapM_ (checkNoFixedTEsNamed "data constructor") (conNamesAndTypes d)
   where
-    conNamesAndTypes = 
+    conNamesAndTypes =
       map (makePair dataConName (map withoutBang . dataConTypes)) . dataCons
 
 
 
 -- | Checks a @newtype@ declaration. The following restrictions must hold:
---   
+--
 --   * The declared type constructor is not a primitive type.
 --   * The variables occurring on the right-hand side have to be mentioned on
 --     the left-hand side, and the left-hand side variables are pairwise
@@ -100,7 +100,7 @@ checkNewtypeDecl d =
 
 
 -- | Checks a @type@ declaration. The following restrictions must hold:
---   
+--
 --   * The declared type constructor is not a primitive type.
 --   * The variables occurring on the right-hand side have to be mentioned on
 --     the left-hand side, and the left-hand side variables are pairwise
@@ -110,7 +110,7 @@ checkNewtypeDecl d =
 --   * No fixed type expression occurs in the right-hand side type expression.
 
 checkTypeDecl :: TypeDeclaration -> ErrorOr ()
-checkTypeDecl d = 
+checkTypeDecl d =
   inDecl (TypeDecl d) $ do
     checkNotPrimitive (typeName d)
     checkVariables (typeVars d) (freeTypeVariables $ typeRhs d)
@@ -120,9 +120,9 @@ checkTypeDecl d =
 
 
 -- | Checks a @class@ declaration. The following restrictions must hold:
---   
+--
 --   * The declared type class does not equal a primitive type.
---   * The names of the class methods are pairwise distinct. 
+--   * The names of the class methods are pairwise distinct.
 --   * The class variable occurs in the type expression of every class method.
 --   * The name of the class does not occur in a type expression of any class
 --     method.
@@ -135,6 +135,7 @@ checkClassDecl d =
     checkClassMethodsDistinct (map signatureName . classFuns $ d)
     checkClassVarInMethods (classVar d) (classFuns d)
     checkClassDeclNotRecursive (className d) (classFuns d)
+    checkClassVarParamCount d
     mapM_ (checkNoFixedTEsNamed "class method")
           (map (makePair signatureName (singletonList . signatureType))
                (classFuns d))
@@ -142,7 +143,7 @@ checkClassDecl d =
 
 
 -- | Checks a type signature. The following restrictions must hold:
---   
+--
 --   * No fixed type expressions occurs in the type expression of this type
 --     signature.
 
@@ -174,7 +175,7 @@ checkDataAndNewtypeDeclarations = foldChecks checkDN
 
     dataConsAndTypes =
       map (makePair dataConName (map withoutBang . dataConTypes)) . dataCons
-    
+
     newtypeConAndType = makePair newtypeCon (singletonList . newtypeRhs)
 
 
@@ -192,7 +193,7 @@ checkNotPrimitive :: Identifier -> ErrorOr ()
 checkNotPrimitive (Ident name) =
   errorIf (name `elem` ["Int", "Integer", "Float", "Double", "Char"]) $
     pp ("A primitive type must not have a declaration.")
-  
+
 
 
 -- | Checks if the second argument set is contained in the first argument list.
@@ -235,8 +236,8 @@ checkNotEmpty cons =
 --   a type constructor. If so, and if the identifier is applied not only to
 --   type variables, it is called nested and an error message is created.
 
-checkNotNested :: 
-    Identifier -> [TypeExpression] -> (Identifier, [TypeExpression]) 
+checkNotNested ::
+    Identifier -> [TypeExpression] -> (Identifier, [TypeExpression])
     -> ErrorOr ()
 checkNotNested con vs (dcon, ts) =
   errorIf (any (satisfiesSomewhere isNested) ts) $
@@ -278,6 +279,8 @@ checkClassMethodsDistinct is =
 
 -- | Checks if the given identifier occurs as free type variable in every
 --   signature. If not, an error message is created.
+--   (thr) the application of the class var to types does not
+--         change its free quality.
 
 checkClassVarInMethods :: TypeVariable -> [Signature] -> ErrorOr ()
 checkClassVarInMethods v@(TV vName) ss =
@@ -288,7 +291,7 @@ checkClassVarInMethods v@(TV vName) ss =
         pp ("The type variable `" ++ unpackIdent vName ++ "' must occur free "
             ++ "in the type expressions of every class method. "
             ++ violating "class method" (map (unpackIdent . signatureName) ms))
-    
+
 
 
 -- | Checks that the name of a type class does not occur in any of the class
@@ -302,6 +305,14 @@ checkClassDeclNotRecursive ident sigs =
             ++ "type expression of any class method of this class. "
             ++ violating "class method" (map (unpackIdent . signatureName) ms))
 
+
+-- | (thr) Checks that every occurence of the class' type variable parameter
+--         is applied to the same amount of parameters.
+
+checkClassVarParamCount :: ClassDeclaration -> ErrorOr ()
+checkClassVarParamCount cd = errorIf (isNothing . getClassArity $ cd)
+  (pp $ "Different occurences of type constructor, " ++
+      "variable with different arities.")
 
 
 -- | Checks that no FixedTypeExpression occurs in the given list of named
@@ -320,10 +331,10 @@ checkNoFixedTEsNamed tag (con, ts) =
 --   If it does, an error message is created.
 
 checkNoFixedTEs :: TypeExpression -> ErrorOr ()
-checkNoFixedTEs t = 
+checkNoFixedTEs t =
   let e = checkNoFixedTEsPlain t
    in errorIf (isJust e) (pp . fromJust $ e)
-  
+
 
 
 -- | Returns an error if a FixedTypeExpression occurs in the argument, otherwise
@@ -390,8 +401,3 @@ extractRepeatingElements =
 
 satisfiesSomewhere :: (Data a, Data b) => (a -> Bool) -> b -> Bool
 satisfiesSomewhere predicate x = everything (||) (False `mkQ` predicate) x
-
-
-
-
-
