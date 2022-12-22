@@ -192,7 +192,7 @@ interpretM l t = case t of
     -- (thr) create a relation for type constructor variable application
   TypeVarApp v ts -> do
     env <- ask
-    rv <- maybeToMonad (Map.lookup v env) -- (RelVar ri rv)
+    let rv = fromMaybe (error "Data.Map.lookup: Key not found") (Map.lookup v env) -- (RelVar ri rv)
     let rvname = case rv of
                     (RelConsFunVar _ name) -> name
                     (RelVar _ name) -> name
@@ -200,7 +200,10 @@ interpretM l t = case t of
     genri <- mkRelationInfo l t
 
     -- (thr) right now, only single type parameters are supported.
-    (r:_) <- mapM (interpretM l) ts   -- interpret the subtypes
+    rs <- mapM (interpretM l) ts  -- interpret the subtypes
+    let r = case rs of
+          [] -> error "empty list in interpretM"
+          (r:_) -> r
 
     return (RelTypeConsApp genri rvname r)
 
